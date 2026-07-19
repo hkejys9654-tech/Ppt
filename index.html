@@ -160,13 +160,13 @@ function makeRowEl(sec, val){
   div.className = 'row';
   const inp = document.createElement('input');
   inp.type = 'text'; inp.value = val || ''; inp.placeholder = '내용을 적어주세요';
-  inp.addEventListener('input', preview);
+  inp.addEventListener('input', () => { preview(); scheduleBuild(); });
   const del = document.createElement('button');
   del.className = 'del'; del.textContent = '✕'; del.title = '이 줄 지우기';
   del.onclick = () => {
     const box = document.getElementById('rows'+sec);
     if (box.children.length <= 1) { toast('마지막 한 줄은 지울 수 없어요'); return; }
-    div.remove(); preview();
+    div.remove(); preview(); scheduleBuild();
   };
   div.appendChild(inp); div.appendChild(del);
   return div;
@@ -177,7 +177,7 @@ function addRow(sec, val){
   const el = makeRowEl(sec, val);
   box.appendChild(el);
   if (val === undefined) el.querySelector('input').focus();
-  preview();
+  preview(); scheduleBuild();
 }
 function getRows(sec){
   return [...document.querySelectorAll('#rows'+sec+' input')]
@@ -198,6 +198,36 @@ function preview(){
       body.appendChild(b);
     });
   });
+}
+
+
+// ---------- 미리 만들어두기 (공유창이 바로 뜨게) ----------
+let zipReady = null, cachedBlob = null, cachedName = '', buildTimer = null;
+function currentData(){
+  return {
+    title: document.getElementById('deptName').value.trim(),
+    h1: document.getElementById('h1').value.trim(),
+    h2: document.getElementById('h2').value.trim(),
+    b1: getRows(1), b2: getRows(2)
+  };
+}
+function dataOk(d){ return d.title && d.h1 && d.h2 && d.b1.length && d.b2.length; }
+async function rebuild(){
+  const d = currentData();
+  if (!dataOk(d)) { cachedBlob = null; return; }
+  try {
+    if (!zipReady) zipReady = await JSZip.loadAsync(TEMPLATE_B64, { base64: true });
+    zipReady.file('ppt/slides/slide1.xml', buildSlideXml(d.title, d.h1, d.b1, d.h2, d.b2));
+    cachedBlob = await zipReady.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    });
+    cachedName = d.title + '_활동자료.pptx';
+  } catch(e) { cachedBlob = null; console.error(e); }
+}
+function scheduleBuild(){
+  clearTimeout(buildTimer);
+  buildTimer = setTimeout(rebuild, 400);
 }
 
 // ---------- PPT 생성 ----------
@@ -237,50 +267,36 @@ function buildSlideXml(title, h1, b1, h2, b2){
 }
 
 async function makeFile(mode){
-  const title = document.getElementById('deptName').value.trim();
-  const h1 = document.getElementById('h1').value.trim();
-  const h2 = document.getElementById('h2').value.trim();
-  const b1 = getRows(1), b2 = getRows(2);
-  if (!title) { toast('부서 이름을 적어주세요'); return; }
-  if (!h1 || !h2) { toast('칸 제목을 적어주세요'); return; }
-  if (!b1.length || !b2.length) { toast('내용을 한 줄 이상 적어주세요'); return; }
+  const d = currentData();
+  if (!d.title) { toast('부서 이름을 적어주세요'); return; }
+  if (!d.h1 || !d.h2) { toast('칸 제목을 적어주세요'); return; }
+  if (!d.b1.length || !d.b2.length) { toast('내용을 한 줄 이상 적어주세요'); return; }
 
-  document.getElementById('btnSave').disabled = true;
-  document.getElementById('btnShare').disabled = true;
-  toast('파일 만드는 중...');
+  // 캐시가 없으면 즉석 생성 (수십 ms 수준)
+  if (!cachedBlob) await rebuild();
+  if (!cachedBlob) { toast('파일 준비에 실패했어요. 다시 눌러주세요.'); return; }
 
-  try {
-    const zip = await JSZip.loadAsync(TEMPLATE_B64, { base64: true });
-    zip.file('ppt/slides/slide1.xml', buildSlideXml(title, h1, b1, h2, b2));
-    const blob = await zip.generateAsync({
-      type: 'blob',
-      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-    });
-    const fname = title + '_활동자료.pptx';
+  const blob = cachedBlob, fname = cachedName;
 
-    if (mode === 'share') {
-      const file = new File([blob], fname, { type: blob.type });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({ files: [file], title: fname });
-          toast('공유 완료! 🎉');
-        } catch(e) {
-          if (e.name !== 'AbortError') { download(blob, fname); toast('공유 창을 열 수 없어 파일로 저장했어요.\n다운로드 폴더에서 공유해 주세요.'); }
+  if (mode === 'share') {
+    const file = new File([blob], fname, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: fname });
+        toast('공유 완료! 🎉');
+      } catch(e) {
+        if (e.name !== 'AbortError') {
+          download(blob, fname);
+          toast('공유창을 못 열어서 파일로 저장했어요.\n[내 파일 → 다운로드]에서 꾹 눌러 공유해 주세요.');
         }
-      } else {
-        download(blob, fname);
-        toast('이 화면에선 바로 공유가 안 돼요.\n파일로 저장했으니 [내 파일 → 다운로드]에서 꾹 눌러 공유해 주세요.');
       }
     } else {
       download(blob, fname);
-      toast('저장 완료! 📂 [내 파일 → 다운로드]에 있어요.');
+      toast('이 브라우저는 바로 공유가 안 돼요.\n파일로 저장했으니 [내 파일 → 다운로드]에서 꾹 눌러 공유해 주세요.');
     }
-  } catch(e) {
-    toast('앗, 오류가 났어요. 다시 한번 눌러주세요.');
-    console.error(e);
-  } finally {
-    document.getElementById('btnSave').disabled = false;
-    document.getElementById('btnShare').disabled = false;
+  } else {
+    download(blob, fname);
+    toast('저장 완료! 📂 [내 파일 → 다운로드]에 있어요.');
   }
 }
 
@@ -326,8 +342,9 @@ function toast(msg){
 // ---------- 초기화 ----------
 defaults1.forEach(v => document.getElementById('rows1').appendChild(makeRowEl(1, v)));
 defaults2.forEach(v => document.getElementById('rows2').appendChild(makeRowEl(2, v)));
-['deptName','h1','h2'].forEach(id => document.getElementById(id).addEventListener('input', preview));
+['deptName','h1','h2'].forEach(id => document.getElementById(id).addEventListener('input', () => { preview(); scheduleBuild(); }));
 preview();
+scheduleBuild();
 </script>
 </body>
 </html>
